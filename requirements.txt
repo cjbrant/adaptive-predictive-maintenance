@@ -1,0 +1,10 @@
+numpy>=1.24
+scipy>=1.11
+pandas>=2.0
+matplotlib>=3.7
+sentence-transformers>=2.2
+chromadb>=0.4
+PyMuPDF>=1.24.0
+jupyter>=1.0
+ipykernel>=6.25
+pytest>=7.4

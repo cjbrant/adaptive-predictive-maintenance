@@ -1,0 +1,31 @@
+# Data (downloaded, not committed)
+data/raw/*.mat
+data/processed/*.csv
+data/vectorstore/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reports (generated)
+reports/*.html

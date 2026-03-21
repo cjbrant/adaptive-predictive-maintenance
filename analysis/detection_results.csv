@@ -1,0 +1,6 @@
+model,detection_lead_time,false_alarm_rate,detection_success
+Static curve,100,0.000,True
+Rolling refit,100,0.000,True
+Threshold alarm,100,0.000,True
+PID adaptive,84,0.000,True
+PID + regime,91,0.000,True

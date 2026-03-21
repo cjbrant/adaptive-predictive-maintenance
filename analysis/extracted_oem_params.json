@@ -1,0 +1,300 @@
+{
+  "bearing_6205": {
+    "model": "SKF 6205-2RS JEM",
+    "bore_mm": 25.0,
+    "outside_diameter_mm": 52.0,
+    "width_mm": 15.0,
+    "dynamic_load_rating_kn": 14.8,
+    "static_load_rating_kn": 7.8,
+    "life_exponent": 3.0,
+    "bpfi": 5.4152,
+    "bpfo": 3.5848,
+    "ftf": 0.39828,
+    "bsf": 4.7135,
+    "max_speed_rpm": 18000.0,
+    "source_chunks": [
+      "TABLE: skf_general_catalogue.pdf p.310 (sim=0.969)",
+      "PROSE(dynamic_load_rating_kn): skf_general_catalogue.pdf p.82",
+      "PROSE(life_exponent): skf_general_catalogue.pdf p.56",
+      "PROSE(life_exponent): skf_general_catalogue.pdf p.56"
+    ]
+  },
+  "bearing_6203": {
+    "model": "SKF 6203-2RS JEM",
+    "bore_mm": 17.0,
+    "outside_diameter_mm": 40.0,
+    "width_mm": 12.0,
+    "dynamic_load_rating_kn": 9.95,
+    "static_load_rating_kn": 4.75,
+    "life_exponent": 3.0,
+    "bpfi": 4.9469,
+    "bpfo": 3.053,
+    "ftf": 0.3817,
+    "bsf": 3.9874,
+    "max_speed_rpm": 24000.0,
+    "source_chunks": [
+      "TABLE: skf_general_catalogue.pdf p.308 (sim=0.978)",
+      "PROSE(dynamic_load_rating_kn): skf_general_catalogue.pdf p.82",
+      "PROSE(life_exponent): skf_general_catalogue.pdf p.56",
+      "PROSE(life_exponent): skf_general_catalogue.pdf p.56"
+    ]
+  },
+  "vibration_thresholds": {
+    "good_upper": 0.71,
+    "acceptable_upper": 1.8,
+    "alarm_upper": 4.5,
+    "accel_normal": 0.5,
+    "accel_warning": 1.0,
+    "accel_alert": 2.0,
+    "accel_danger": 2.0,
+    "source": "ISO 10816-1 Class I (standard values \u2014 not found in PDF corpus)"
+  },
+  "failure_stages": [
+    {
+      "stage_number": 4,
+      "name": "Advanced damage",
+      "description": "When flaking has proceeded to a certain stage, it makes its presence known in the form of noise and vibra- tions, which serve as a warning that it is time to change the bearing. The causes of premature flaking may be heavier external loading than had been anticipated, preloading on account of incorr",
+      "vibration_indicator": "high vibration, audible noise, elevated temperature"
+    },
+    {
+      "stage_number": 1,
+      "name": "Subsurface initiation",
+      "description": "Bearing life and bearing failures Most bearings outlive the machinery in which they are installed . Only some fail .",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 2,
+      "name": "Microscopic spalling",
+      "description": "Inspection and troubleshooting When a problem occurs, inspection during operation or standstill and immediate trouble shooting can give hints about what is happening . The very important subject of condition moni- toring (finding damage in time) is not covered here . More information about c",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 3,
+      "name": "Visible spalling",
+      "description": "Path patterns Once damage has occurred, the bearing needs to be examined and analyzed . Analysis requires a good understanding of path patterns .",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 4,
+      "name": "Advanced damage",
+      "description": "ISO failure modes classification Terminology and the ISO classification system helps to communicate the type of damage and its possible causes .",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "Damage and actions A number of cases are described together with corrective actions . In this chapter, only non- destructive analysis is covered .",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 6,
+      "name": "Catastrophic failure",
+      "description": "Other investigations For complex cases, there are several advanced and destructive methods for failure analysis available at SKF\u2019s labo- ratories . This chapter provides a brief summary .",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 7,
+      "name": "Stage 7",
+      "description": "Case studies Bearing damage analysis can be quite complex . This is demonstrated with a few case studies .",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 8,
+      "name": "Stage 8",
+      "description": "Appendices Appendices A to E contain key charts for quick overviews, hints about how to collect bearing damage information, and a glossary for easy reference . Appendix C: Bearing damage and failures \u2013 modes and causes 8 Appendices Failure modes with characteristics Rolling contact fatigue Subsu",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "1 Rolling contact fatigue",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 1,
+      "name": "Subsurface initiation",
+      "description": "2 Subsurface initiated fatigue",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 1,
+      "name": "Subsurface initiation",
+      "description": "3 Surface initiated fatigue",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 2,
+      "name": "Microscopic spalling",
+      "description": "2 Abrasive wear",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 2,
+      "name": "Microscopic spalling",
+      "description": "3 Adhesive wear",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "3 Corrosion",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 3,
+      "name": "Visible spalling",
+      "description": "2 Moisture corrosion",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 3,
+      "name": "Visible spalling",
+      "description": "3 Frictional corrosion",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 3,
+      "name": "Visible spalling",
+      "description": "2 Fretting corrosion",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 3,
+      "name": "Visible spalling",
+      "description": "3 False brinelling",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "4 Electrical erosion",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 4,
+      "name": "Advanced damage",
+      "description": "2 Excessive current erosion",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 4,
+      "name": "Advanced damage",
+      "description": "3 Current leakage erosion",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "5 Plastic deformation",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "2 Overload deformation",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "3 Indentations from particles",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "6 Cracking and fracture",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 6,
+      "name": "Catastrophic failure",
+      "description": "2 Forced fracture",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 6,
+      "name": "Catastrophic failure",
+      "description": "3 Fatigue fracture",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 6,
+      "name": "Catastrophic failure",
+      "description": "4 Thermal cracking 4 ISO failure modes classification Failure modes Rolling contact fatigue Subsurface initiated fatigue In a rotating bearing, cyclic stress changes occur beneath the contact surfaces of the raceways and rolling elements . Consider the rotating inner ring of a radial bearing wit",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 0,
+      "name": "Stage 0",
+      "description": "5 mm (figs . 2 and 3) . The depth depends on the load, material, cleanliness, temperature and the micro- structure of the steel . The crack finally propagates to the surface and spalling occurs (fig . 4) .",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "1 Rolling contact fatigue",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 1,
+      "name": "Subsurface initiation",
+      "description": "2 Subsurface initiated fatigue",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 1,
+      "name": "Subsurface initiation",
+      "description": "3 Surface initiated fatigue \u2022 repeated stress changes \u2022 material structural changes \u2022 microcracks under the surface \u2022 crack propagation \u2022 spalling Fig . 2 Fig . 3 10 million revolutions 63 million revolutions 630 million revolutions Changes in structure beneath the raceway surface over time (heavil",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 1,
+      "name": "Subsurface initiation",
+      "description": "Bearing exhibits incipient abrasive wear .",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 2,
+      "name": "Microscopic spalling",
+      "description": "First spall, detected by SKF enveloped acceleration technology .",
+      "vibration_indicator": "detectable by enveloped acceleration / ultrasonics"
+    },
+    {
+      "stage_number": 3,
+      "name": "Visible spalling",
+      "description": "Spalling has developed to an extent that the damage can be detected by standard vibration monitoring .",
+      "vibration_indicator": "detectable by standard vibration monitoring"
+    },
+    {
+      "stage_number": 4,
+      "name": "Advanced damage",
+      "description": "Advanced spalling causes high vibration and noise levels and an increase in operating temperature .",
+      "vibration_indicator": "high vibration, audible noise, elevated temperature"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "Severe damage occurs: fatigue fracture of the bearing inner ring .",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 6,
+      "name": "Catastrophic failure",
+      "description": "Catastrophic failure occurs with sec- ondary damage to other components . Monitoring noise and vibration A common method used to try to identify deterioration or damage in a bearing is by listening . Bearings that are in good condi- tion produce a soft purring noise . Grinding, squeaking and othe",
+      "vibration_indicator": "high vibration, audible noise, elevated temperature"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "5) \u2192 Overload deformation The permanent deformation of a shape that does not involve the removal of material . This type of damage occurs when a load exceeds the yield strength of the material . Ploughing \u2192 Scoring Polishing wear An extremely mild form of abrasive wear that results in a highly p",
+      "vibration_indicator": "not specified"
+    },
+    {
+      "stage_number": 5,
+      "name": "Severe damage",
+      "description": "1) Surface or subsurface initiated fatigue that occurs in a rolling bearing due to repetitive stress cycles in operation . Typically associated with the bearing rating life . Root cause analysis (RCA) Investigation to identify the root causes of problems, to identify corrective actions to avoi",
+      "vibration_indicator": "not specified"
+    }
+  ]
+}
