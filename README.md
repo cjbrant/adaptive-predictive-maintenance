@@ -1,41 +1,46 @@
 # Adaptive Predictive Maintenance with OEM Priors
 
-Most bearing maintenance boils down to one of two strategies: replace on a fixed schedule (safe but wasteful) or wait for the vibration alarm to fire (reactive and too late for planning). This project builds a third option — start from the manufacturer's expected life curve, then adapt it in real time using a PID feedback controller on actual vibration data. The result is a bearing-specific remaining useful life estimate that updates continuously.
+PID feedback control for bearing remaining useful life estimation, benchmarked across five public datasets, three bearing manufacturers, and three tiers of OEM prior quality. A RAG pipeline extracts the bearing specs automatically from manufacturer PDF catalogs.
 
-The interesting finding is in the regime analysis. The overall numbers favor a simple static curve over the adaptive models, but when you break results down by degradation phase, the regime-switching PID variant cuts prediction error by 6x during the mild damage phase — exactly the transition from "this bearing is fine" to "this bearing has started to fail." That's where maintenance decisions are hardest and where the adaptive approach earns its keep.
+## Problem
 
-## What's in here
+Bearings get replaced on a schedule derived from the manufacturer's L10 life rating. L10 is a fleet statistic. It doesn't account for installation quality, contamination, or load changes on a specific machine. Most bearings have life left at replacement; the ones that don't fail between scheduled swaps at 5-10x the cost.
 
-**Phase 1 — OEM spec extraction.** A RAG pipeline ingests ~500 pages of real SKF PDF documentation (the Rolling Bearings General Catalog, Bearing Damage and Failure Analysis guide, and Bearing Failures guide), chunks them with structure-aware parsing that handles dense product tables, embeds with MiniLM-L6-v2, and retrieves the specific load ratings and life parameters for the SKF 6205-2RS. The pipeline correctly extracts all key specs from a 354-page catalog — dynamic load rating, static load rating, bore diameter, life exponent — using a hybrid of semantic retrieval and exact text matching.
+This project builds a third option between scheduled replacement and waiting for the vibration alarm: start from the OEM's expected life curve, then adapt it in real time using a PID controller on actual vibration data. The result is a bearing-specific remaining useful life estimate that updates continuously, requires zero training data, and runs in constant time per observation.
 
-**Phase 2 — Adaptive drift modeling.** Vibration features (kurtosis, RMS, defect frequency energy) are extracted from the CWRU Bearing Data Center recordings and arranged into a synthetic degradation trajectory. A PID controller tracks the deviation between observed kurtosis and the OEM-derived baseline curve, producing an adapted remaining life estimate. A regime-switching variant monitors error volatility and increases PID gains when it detects the transition from normal wear to accelerated damage.
+## How it works
 
-Five models are compared: threshold alarm, static exponential curve, rolling refit, PID adaptive, and PID + regime. Evaluation uses RMSE, MAE, detection lead time, false alarm rate, and the NASA asymmetric scoring function (which penalizes late predictions — missed failures — exponentially harder than early ones).
+**OEM spec extraction.** A RAG pipeline ingests manufacturer PDF catalogs (SKF, Rexnord, LDK), chunks them with structure-aware parsing, embeds with MiniLM-L6-v2, and retrieves the dynamic load rating and life exponent for a given bearing designation. Handles dense product tables, scanned catalogs via OCR, and multi-variant disambiguation. Each extraction gets a confidence tier (high/medium/low/fallback) for human review.
+
+**Adaptive drift model.** Vibration features (kurtosis, RMS, defect frequency energy) are extracted from sensor recordings. A PID controller tracks deviation between observed degradation and the OEM baseline curve, producing an adapted RUL estimate at each measurement. A regime-switching variant monitors error volatility and increases PID gains when it detects the transition from normal wear to accelerated damage.
+
+**Evaluation.** Five models compared (threshold alarm, static exponential curve, rolling refit, PID adaptive, PID+regime) using RMSE, MAE, detection lead time, false alarm rate, and the NASA asymmetric scoring function.
+
+## Datasets
+
+| Dataset | Equipment | Manufacturer | Prior Quality | Trajectories |
+|---------|-----------|-------------|---------------|-------------|
+| IMS | Roller bearing | Rexnord ZA-2115 | Exact OEM | 4 failures |
+| XJTU-SY | Ball bearing | LDK UER204 | Exact OEM | 15 run-to-failure |
+| FEMTO | Ball bearing | Unknown (≈SKF 6204) | Approximate | 17 trajectories |
+| C-MAPSS | Turbofan engine | N/A (fleet prior) | Fleet-derived | 200 engines |
+| CWRU | Ball bearing | SKF 6205-2RS | Exact OEM | Synthetic reference |
 
 ## Key results
 
-| Phase | PID Adaptive MAE (hrs) | PID + Regime MAE (hrs) |
-|-------|----------------------|----------------------|
-| Healthy | 1,412 | 1,412 |
-| Mild (0.007") | 779 | **125** |
-| Moderate (0.014") | 48 | 50 |
-| Severe (0.021") | 47 | 49 |
+On real run-to-failure bearing data, PID variants beat static baselines by 18-20% RMSE on IMS. The regime-switching variant reduced RMSE by an additional 26.7% on XJTU-SY, concentrated at the mild-to-severe damage transition where maintenance decisions are hardest.
 
-The regime predictor's value is concentrated at the mild damage transition — after that, both models converge because the signal is obvious. All models achieve 100% detection success with zero false alarms.
+The RAG pipeline extracted specs from three manufacturers' catalogs with no fallbacks. Two of four extractions hit within 7% of ground truth. The framework generalizes across manufacturers without any manufacturer-specific tuning.
 
-## Data
-
-**CWRU Bearing Data Center**: Vibration recordings from an SKF 6205-2RS JEM deep groove ball bearing on a 2 HP motor test rig at ~1,750 RPM. Pre-seeded faults at 0.007", 0.014", and 0.021" on inner race, outer race, and rolling elements. 12,000 Hz sampling rate. Downloaded by `src/download_cwru.py`.
-
-**SKF OEM documentation**: Real PDFs from SKF's public catalog and failure analysis guides. Not included in the repo — download with `scripts/download_oem_docs.sh`.
+On smooth simulated degradation (C-MAPSS), the static curve wins because the degradation is well-described by a simple function. The PID framework earns its keep on real nonlinear degradation and stays out of the way on smooth trends.
 
 ## Project structure
 
 ```
 data/
-  raw/              # CWRU .mat files (downloaded by script)
+  raw/              # Vibration recordings (downloaded by scripts)
   processed/        # Extracted feature time series
-  oem/              # SKF PDFs (downloaded by script)
+  oem/              # Manufacturer PDFs (downloaded by script)
 
 src/
   download_cwru.py        # Fetch CWRU vibration data
@@ -54,14 +59,14 @@ rag/
 
 notebooks/
   01_oem_extraction.ipynb     # RAG pipeline walkthrough
-  02_feature_exploration.ipynb # CWRU data and feature analysis
-  03_model_comparison.ipynb    # Full model comparison
+  02_feature_exploration.ipynb # Feature analysis per dataset
+  03_model_comparison.ipynb    # Full benchmark comparison
 
 reports/
-  adaptive_maintenance.Rmd    # Final report
+  benchmark_report.Rmd    # Multi-dataset benchmark report
   figures/
 
-analysis/                     # All numeric outputs as CSV/JSON
+analysis/                 # All numeric outputs as CSV/JSON
 ```
 
 ## Setup
@@ -70,14 +75,16 @@ analysis/                     # All numeric outputs as CSV/JSON
 pip install -r requirements.txt
 bash scripts/download_oem_docs.sh
 python src/download_cwru.py
+python src/download_ims.py
+python src/download_xjtu.py
 ```
 
 Then run the notebooks in order, or knit the report directly.
 
 ## Limitations
 
-The synthetic degradation trajectory (concatenating discrete fault severities) creates step-change transitions that penalize adaptive models and don't reflect real bearing degradation. The CWRU dataset was chosen for its direct connection to documented SKF bearing specs, but validation on true run-to-failure data (IMS, FEMTO/PRONOSTIA) is the obvious next step.
+All bearing datasets use accelerated degradation with loads chosen to produce failure in hours or days. The model tracks a single feature (kurtosis) on a single axis. Sample sizes are small (4-15 bearings per dataset). These comparisons are directional, not statistically definitive. See the benchmark report for full discussion.
 
 ## Related
 
-This uses the same PID adaptive drift framework from [adaptive-drift-forecasting](https://github.com/cjbrant/adaptive-drift-forecasting), applied to a domain where the physics are cleaner and the stakes are more concrete.
+This extends the PID adaptive drift framework from [adaptive-drift-forecasting](https://github.com/cjbrant/adaptive-drift-forecasting) into a domain where the physics are cleaner and the stakes are more concrete.

@@ -1,10 +1,10 @@
 numpy>=1.24
-scipy>=1.11
+scipy>=1.10
 pandas>=2.0
 matplotlib>=3.7
+seaborn>=0.12
+h5py>=3.8
 sentence-transformers>=2.2
 chromadb>=0.4
-PyMuPDF>=1.24.0
-jupyter>=1.0
-ipykernel>=6.25
-pytest>=7.4
+PyMuPDF>=1.22
+pytest>=7.0

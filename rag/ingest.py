@@ -1,457 +1,506 @@
-"""Ingest OEM PDF documents into ChromaDB vector store.
+"""Structure-aware chunking and ChromaDB ingestion for OEM bearing PDFs.
 
-Extracts text from real SKF PDFs, chunks intelligently around document
-structure (prose sections, product tables, mixed content), embeds with
-sentence-transformers, and stores in a persistent ChromaDB collection.
+Second stage of the RAG pipeline:
+    pdf_extract -> **ingest** -> retrieve -> extract_params
+
+Handles three content types:
+- Prose (theory, failure descriptions): split on section headers, 200-400 words
+- Tables (bearing specs): preserve header rows, ~15-20 rows per chunk
+- Mixed/short (appendices, glossaries): page-boundary chunking
 """
 
 from __future__ import annotations
 
+import csv
 import re
 from pathlib import Path
 
-import pandas as pd
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-from rag.pdf_extract import extract_all_pdfs, is_table_page, find_table_header
+from rag.pdf_extract import extract_all_pdfs
+
+# ---------------------------------------------------------------------------
+# Manufacturer detection
+# ---------------------------------------------------------------------------
+
+_KNOWN_MANUFACTURERS = ["SKF", "Rexnord", "LDK"]
 
 
-DEFAULT_OEM_DIR = Path("data/oem")
-DEFAULT_DB_DIR = Path("data/vectorstore")
-COLLECTION_NAME = "oem_bearing_specs"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+def detect_manufacturer(filename: str, first_page_text: str) -> str:
+    """Detect bearing manufacturer from filename or first-page text.
 
-# Target chunk sizes in words
-MIN_CHUNK_WORDS = 60
-TARGET_CHUNK_WORDS = 250
-MAX_CHUNK_WORDS = 500
-TABLE_ROWS_PER_CHUNK = 18
-
-
-def _detect_section_header(line: str, prev_line: str, next_line: str) -> bool:
-    """Heuristic to detect section headers in SKF documents."""
-    stripped = line.strip()
-    if not stripped or len(stripped) > 100:
-        return False
-    # Numbered sections: "1 Bearing life", "2.3 Lubrication"
-    if re.match(r"^\d+(\.\d+)*\s+[A-Z]", stripped):
-        return True
-    # Short title-case or uppercase lines preceded by blank
-    if (
-        len(stripped) < 80
-        and (not prev_line.strip())
-        and not re.match(r"^\d+[\s,.]", stripped)  # not a table row
-        and (stripped.istitle() or stripped.isupper())
-    ):
-        return True
-    return False
+    Checks filename first, then first-page text for known manufacturer names.
+    Returns 'Unknown' if no match found.
+    """
+    fn_upper = filename.upper()
+    text_upper = first_page_text.upper()
+    for mfr in _KNOWN_MANUFACTURERS:
+        if mfr.upper() in fn_upper or mfr.upper() in text_upper:
+            return mfr
+    return "Unknown"
 
 
-def _word_count(text: str) -> int:
-    return len(text.split())
+# ---------------------------------------------------------------------------
+# Content-type classification
+# ---------------------------------------------------------------------------
+
+def classify_content_type(text: str) -> str:
+    """Classify a page/block as 'table', 'prose', or 'mixed'.
+
+    Table heuristic: >40% of characters are digits, and multiple lines
+    match the pattern of a designation followed by numbers.
+    """
+    if not text.strip():
+        return "mixed"
+
+    # Count digit fraction
+    total_chars = len(re.sub(r"\s", "", text))
+    if total_chars == 0:
+        return "mixed"
+    digit_chars = sum(1 for c in text if c.isdigit())
+    digit_frac = digit_chars / total_chars
+
+    # Count lines matching "designation + numbers" pattern
+    # e.g. "6205 25 52 15 14.8 7.8 0.335"
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    table_line_pattern = re.compile(
+        r"^[\w\-/]+\s+[\d.]+(?:\s+[\d.]+){2,}"
+    )
+    table_lines = sum(1 for l in lines if table_line_pattern.match(l))
+    table_line_frac = table_lines / max(len(lines), 1)
+
+    if digit_frac > 0.40 and table_line_frac > 0.30:
+        return "table"
+    if digit_frac > 0.50:
+        return "table"
+    if table_line_frac > 0.50:
+        return "table"
+
+    return "prose"
 
 
-def _chunk_prose(
-    text: str,
-    source: str,
-    page: int,
-    base_header: str,
-) -> list[dict]:
-    """Chunk prose content by section headers and paragraph boundaries."""
-    lines = text.split("\n")
-    chunks = []
-    current_section = base_header
-    current_buf: list[str] = []
+# ---------------------------------------------------------------------------
+# Section header detection
+# ---------------------------------------------------------------------------
 
-    def flush_buffer():
-        nonlocal current_buf
-        content = "\n".join(current_buf).strip()
-        if _word_count(content) >= MIN_CHUNK_WORDS:
-            chunks.append(
-                {
-                    "text": content,
-                    "source_file": source,
-                    "page": page,
-                    "section_header": current_section,
-                    "content_type": "prose",
-                }
-            )
-        elif chunks and _word_count(content) > 0:
-            # Merge short trailing fragment into previous chunk
-            chunks[-1]["text"] += "\n\n" + content
-        current_buf = []
+_SECTION_HEADER_RE = re.compile(
+    r"^(?:"
+    r"\d+(?:\.\d+)*\s+\S"  # numbered: "1.2 Title" or "3 Title"
+    r"|[A-Z][A-Z\s]{4,}$"  # ALL CAPS lines (at least 5 chars)
+    r")",
+    re.MULTILINE,
+)
 
-    for i, line in enumerate(lines):
-        prev = lines[i - 1] if i > 0 else ""
-        nxt = lines[i + 1] if i < len(lines) - 1 else ""
 
-        if _detect_section_header(line, prev, nxt):
-            # Flush current buffer before starting new section
-            if _word_count("\n".join(current_buf)) >= MIN_CHUNK_WORDS:
-                flush_buffer()
-            current_section = line.strip()
-            current_buf.append(line)
+def _detect_section_header(text: str) -> str:
+    """Extract the most likely section header from a chunk of text."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
             continue
+        if _SECTION_HEADER_RE.match(line):
+            return line[:120]
+    return ""
 
-        current_buf.append(line)
 
-        # Check if buffer exceeds target size at a paragraph boundary
-        buf_text = "\n".join(current_buf)
-        if _word_count(buf_text) >= TARGET_CHUNK_WORDS:
-            # Look for a paragraph break (blank line) near the end
-            if not line.strip():
-                flush_buffer()
-            elif _word_count(buf_text) >= MAX_CHUNK_WORDS:
-                flush_buffer()
+# ---------------------------------------------------------------------------
+# Prose chunking
+# ---------------------------------------------------------------------------
 
-    # Flush remainder
-    flush_buffer()
+def chunk_prose(text: str, target_words: int = 300) -> list[str]:
+    """Split prose text into chunks of approximately *target_words* words.
+
+    Strategy:
+    1. Split on section headers (numbered, ALL CAPS, or short lines before
+       paragraphs).
+    2. Merge sections under 100 words with the next section.
+    3. If a section exceeds target_words * 1.5, split on paragraph breaks.
+    4. Add 1-2 sentence overlap between consecutive chunks.
+    """
+    if not text.strip():
+        return []
+
+    # Split on section headers
+    sections = _split_on_headers(text)
+
+    # Merge small sections
+    sections = _merge_small_sections(sections, min_words=100)
+
+    # Split oversized sections
+    max_words = int(target_words * 1.5)
+    split_sections: list[str] = []
+    for sec in sections:
+        wc = len(sec.split())
+        if wc > max_words:
+            split_sections.extend(_split_by_paragraphs(sec, target_words))
+        else:
+            split_sections.append(sec)
+
+    # Merge any remaining tiny chunks
+    split_sections = _merge_small_sections(split_sections, min_words=100)
+
+    # Add overlap
+    chunks = _add_overlap(split_sections)
     return chunks
 
 
-def _is_table_data_line(line: str) -> bool:
-    """Check if a line is a product table data row (tab-delimited numbers + designation)."""
-    stripped = line.strip()
-    if not stripped or "\t" not in stripped:
-        return False
-    parts = [p.strip() for p in stripped.split("\t") if p.strip()]
-    if len(parts) < 3:
-        return False
-    # Count numeric-looking parts (digits, commas, spaces within numbers)
-    numeric_count = sum(1 for p in parts if re.match(r"^[\d\s,.]+$", p))
-    return numeric_count >= 3
-
-
-def _chunk_table(
-    text: str,
-    source: str,
-    page: int,
-    section_header: str,
-) -> list[dict]:
-    """Chunk product table content, keeping header with each chunk."""
-    lines = text.split("\n")
-
-    # Find the table header
-    header = find_table_header(lines)
-
-    # Separate header/metadata lines from data rows.
-    # In reconstructed tables, data rows are tab-delimited with many numeric values.
-    data_rows: list[str] = []
-    preamble_lines: list[str] = []
-    in_data = False
+def _split_on_headers(text: str) -> list[str]:
+    """Split text at lines matching section header patterns."""
+    lines = text.splitlines(keepends=True)
+    sections: list[str] = []
+    current: list[str] = []
 
     for line in lines:
         stripped = line.strip()
-        if not stripped:
-            continue
-        if _is_table_data_line(line):
-            data_rows.append(stripped)
-            in_data = True
-        elif in_data:
-            # Non-data line after data started (e.g., footnote, page footer)
-            # Keep it as a separator in the data
-            if re.match(r"^\*\s", stripped) or len(stripped) < 30:
-                data_rows.append(stripped)
-            else:
-                data_rows.append(stripped)
+        if stripped and _SECTION_HEADER_RE.match(stripped) and current:
+            sections.append("".join(current).strip())
+            current = []
+        current.append(line)
+
+    if current:
+        sections.append("".join(current).strip())
+
+    return [s for s in sections if s.strip()]
+
+
+def _merge_small_sections(sections: list[str], min_words: int) -> list[str]:
+    """Merge sections with fewer than *min_words* words into the next section."""
+    if not sections:
+        return []
+    merged: list[str] = []
+    buf = sections[0]
+    for sec in sections[1:]:
+        if len(buf.split()) < min_words:
+            buf = buf + "\n\n" + sec
         else:
-            preamble_lines.append(stripped)
+            merged.append(buf)
+            buf = sec
+    merged.append(buf)
+    return merged
 
-    # Build context prefix from preamble
-    preamble_text = " | ".join(preamble_lines[:5]) if preamble_lines else ""
-    context_prefix = f"{section_header}\n{preamble_text}".strip()
-    if header:
-        context_prefix += f"\nColumns: {header}"
 
-    # Chunk data rows
-    chunks = []
-    for start in range(0, len(data_rows), TABLE_ROWS_PER_CHUNK):
-        end = min(start + TABLE_ROWS_PER_CHUNK, len(data_rows))
-        # Include overlap: repeat last 2 rows of previous chunk
-        overlap_start = max(0, start - 2) if start > 0 else 0
-        chunk_rows = data_rows[overlap_start:end]
-        chunk_text = context_prefix + "\n" + "\n".join(chunk_rows)
+def _split_by_paragraphs(text: str, target_words: int) -> list[str]:
+    """Split a long text block into chunks at paragraph boundaries.
 
-        chunks.append(
-            {
-                "text": chunk_text,
-                "source_file": source,
-                "page": page,
-                "section_header": section_header,
-                "content_type": "table",
-            }
-        )
+    Falls back to word-boundary splitting if there are no paragraph breaks.
+    """
+    paragraphs = re.split(r"\n\s*\n", text)
+    paragraphs = [p.strip() for p in paragraphs if p.strip()]
 
-    # If no data rows were found, treat the whole page as a single chunk
-    if not chunks and _word_count(text) >= MIN_CHUNK_WORDS:
-        chunks.append(
-            {
-                "text": text,
-                "source_file": source,
-                "page": page,
-                "section_header": section_header,
-                "content_type": "table",
-            }
-        )
+    # If there's only one "paragraph" (no breaks), split on word boundaries
+    if len(paragraphs) <= 1:
+        return _split_by_words(text, target_words)
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_wc = 0
+
+    for para in paragraphs:
+        pwc = len(para.split())
+        if current_wc + pwc > target_words and current:
+            chunks.append("\n\n".join(current))
+            current = [para]
+            current_wc = pwc
+        else:
+            current.append(para)
+            current_wc += pwc
+
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+def _split_by_words(text: str, target_words: int) -> list[str]:
+    """Split text into chunks of *target_words* at word boundaries."""
+    words = text.split()
+    if len(words) <= target_words:
+        return [text]
+    chunks: list[str] = []
+    for i in range(0, len(words), target_words):
+        chunk = " ".join(words[i : i + target_words])
+        chunks.append(chunk)
+    return chunks
+
+
+def _last_sentences(text: str, n: int = 2) -> str:
+    """Extract the last *n* sentences from text."""
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    overlap = sentences[-n:] if len(sentences) >= n else sentences
+    return " ".join(overlap)
+
+
+def _add_overlap(sections: list[str]) -> list[str]:
+    """Prepend 1-2 sentence overlap from previous chunk."""
+    if len(sections) <= 1:
+        return sections
+    result = [sections[0]]
+    for i in range(1, len(sections)):
+        overlap = _last_sentences(sections[i - 1], 2)
+        result.append(overlap + "\n\n" + sections[i])
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Table chunking
+# ---------------------------------------------------------------------------
+
+def chunk_table(text: str, rows_per_chunk: int = 18) -> list[str]:
+    """Chunk tabular text into logical blocks.
+
+    Two strategies:
+    1. Block-aware: if the table has clear block separators (blank lines
+       or designation-like lines), split on those boundaries so that each
+       bearing's data stays together.
+    2. Row-count fallback: split every *rows_per_chunk* rows, prepending
+       the header to each chunk.
+    """
+    lines = text.splitlines()
+    non_empty = [l for l in lines if l.strip()]
+    if not non_empty:
+        return []
+
+    # Strategy 1: detect logical blocks separated by blank lines
+    # This handles catalogs like Rexnord where each bearing size is
+    # separated by blank lines and blocks are 30-50 lines long.
+    blocks = _split_into_logical_blocks(lines)
+    if blocks and len(blocks) >= 2 and all(len(b) <= 800 for b in blocks):
+        return blocks
+
+    # Strategy 2: simple row-count chunking with header preservation
+    header = non_empty[0]
+    data_rows = non_empty[1:]
+
+    if not data_rows:
+        return [header]
+
+    chunks: list[str] = []
+    for start in range(0, len(data_rows), rows_per_chunk):
+        batch = data_rows[start : start + rows_per_chunk]
+        chunk = header + "\n" + "\n".join(batch)
+        chunks.append(chunk)
 
     return chunks
 
 
-def chunk_pages(pages: list[dict]) -> list[dict]:
+def _split_into_logical_blocks(lines: list[str]) -> list[str]:
+    """Split table lines into logical blocks at blank-line boundaries.
+
+    Groups consecutive non-empty lines together. Merges very small
+    blocks (< 5 lines) with the next block. Returns chunk strings
+    or empty list if the text doesn't have clear block structure.
     """
-    Chunk extracted PDF pages into retrieval-ready segments.
+    raw_blocks: list[list[str]] = []
+    current: list[str] = []
 
-    Dispatches to prose or table chunking based on page content.
-    Merges short pages with neighbors from the same document.
+    for line in lines:
+        if not line.strip():
+            if current:
+                raw_blocks.append(current)
+                current = []
+        else:
+            current.append(line)
+    if current:
+        raw_blocks.append(current)
+
+    if len(raw_blocks) < 2:
+        return []
+
+    # Merge very small blocks with the next block
+    merged: list[list[str]] = []
+    for block in raw_blocks:
+        if merged and len(merged[-1]) < 5:
+            merged[-1].extend(block)
+        else:
+            merged.append(list(block))
+
+    # Convert to strings, skip trivially small blocks
+    result = []
+    for block in merged:
+        text = "\n".join(block)
+        if len(text.strip()) >= 20:
+            result.append(text)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Page-level chunking dispatcher
+# ---------------------------------------------------------------------------
+
+def chunk_page(
+    text: str,
+    content_type: str,
+    section_header: str,
+) -> list[str]:
+    """Chunk a single page based on its content type.
+
+    Returns a list of chunk strings. The *section_header* is informational
+    metadata only and is NOT prepended to the chunk text here (it is stored
+    in metadata instead).
     """
-    all_chunks = []
-
-    # Group pages by source document for merging
-    by_source: dict[str, list[dict]] = {}
-    for page in pages:
-        by_source.setdefault(page["source"], []).append(page)
-
-    for source, doc_pages in by_source.items():
-        pending_short = ""
-        pending_header = ""
-        pending_page = 0
-
-        for pg in doc_pages:
-            text = pg["text"]
-            page_num = pg["page"]
-
-            # Detect content type
-            if pg["is_table"]:
-                # Flush any pending prose
-                if _word_count(pending_short) >= MIN_CHUNK_WORDS:
-                    all_chunks.append(
-                        {
-                            "text": pending_short.strip(),
-                            "source_file": source,
-                            "page": pending_page,
-                            "section_header": pending_header,
-                            "content_type": "prose",
-                        }
-                    )
-                    pending_short = ""
-
-                # Determine section header from text
-                header = _extract_page_section_header(text)
-                chunks = _chunk_table(text, source, page_num, header or "Product table")
-                all_chunks.extend(chunks)
-            else:
-                header = _extract_page_section_header(text)
-                wc = _word_count(text)
-
-                if wc < MIN_CHUNK_WORDS:
-                    # Accumulate short pages
-                    pending_short += "\n\n" + text
-                    if not pending_header:
-                        pending_header = header or ""
-                    if not pending_page:
-                        pending_page = page_num
-                    if _word_count(pending_short) >= TARGET_CHUNK_WORDS:
-                        all_chunks.extend(
-                            _chunk_prose(
-                                pending_short.strip(),
-                                source,
-                                pending_page,
-                                pending_header,
-                            )
-                        )
-                        pending_short = ""
-                        pending_header = ""
-                        pending_page = 0
-                else:
-                    # Flush pending short content first
-                    if pending_short:
-                        combined = pending_short + "\n\n" + text
-                        all_chunks.extend(
-                            _chunk_prose(
-                                combined.strip(),
-                                source,
-                                pending_page or page_num,
-                                pending_header or header or "",
-                            )
-                        )
-                        pending_short = ""
-                        pending_header = ""
-                        pending_page = 0
-                    else:
-                        all_chunks.extend(
-                            _chunk_prose(text, source, page_num, header or "")
-                        )
-
-        # Flush final pending
-        if _word_count(pending_short) >= MIN_CHUNK_WORDS // 2:
-            all_chunks.append(
-                {
-                    "text": pending_short.strip(),
-                    "source_file": source,
-                    "page": pending_page,
-                    "section_header": pending_header,
-                    "content_type": "mixed",
-                }
-            )
-
-    # Add prose overlap: for consecutive prose chunks from the same source,
-    # prepend the last sentence of the previous chunk
-    for i in range(1, len(all_chunks)):
-        prev = all_chunks[i - 1]
-        curr = all_chunks[i]
-        if (
-            prev["source_file"] == curr["source_file"]
-            and prev["content_type"] == "prose"
-            and curr["content_type"] == "prose"
-        ):
-            # Extract last sentence of previous chunk
-            sentences = re.split(r"(?<=[.!?])\s+", prev["text"])
-            if len(sentences) >= 2:
-                overlap = sentences[-1]
-                curr["text"] = f"[...] {overlap}\n\n{curr['text']}"
-
-    # Assign sequential chunk IDs
-    for i, chunk in enumerate(all_chunks):
-        chunk["chunk_index"] = i
-
-    return all_chunks
+    if content_type == "table":
+        return chunk_table(text)
+    elif content_type == "prose":
+        return chunk_prose(text)
+    else:  # mixed
+        # Chunk at ~300 words, merge short pages handled upstream
+        words = text.split()
+        if len(words) <= 400:
+            return [text] if text.strip() else []
+        return chunk_prose(text, target_words=300)
 
 
-def _extract_page_section_header(text: str) -> str | None:
-    """Try to extract a section header from the first few lines of a page."""
-    lines = text.split("\n")
-    for i, line in enumerate(lines[:5]):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        prev = lines[i - 1].strip() if i > 0 else ""
-        nxt = lines[i + 1].strip() if i < len(lines) - 1 else ""
-        if _detect_section_header(line, prev, nxt):
-            return stripped
-    # Fallback: use first non-empty short line
-    for line in lines[:3]:
-        stripped = line.strip()
-        if stripped and len(stripped) < 80 and not re.match(r"^\d+$", stripped):
-            return stripped
-    return None
+# ---------------------------------------------------------------------------
+# Full ingestion pipeline
+# ---------------------------------------------------------------------------
 
+def ingest_oem_pdfs(
+    oem_dir: str | Path = "data/oem",
+    db_path: str | Path = "data/processed/chromadb",
+    collection_name: str = "oem_bearings",
+) -> dict:
+    """Extract, chunk, embed, and store OEM bearing PDFs in ChromaDB.
 
-def ingest_oem_documents(
-    oem_dir: str | Path = DEFAULT_OEM_DIR,
-    db_dir: str | Path = DEFAULT_DB_DIR,
-    model_name: str = EMBEDDING_MODEL,
-) -> tuple[chromadb.Collection, int, list[dict]]:
-    """
-    Ingest all PDF files from the OEM directory into ChromaDB.
+    Parameters
+    ----------
+    oem_dir : directory containing OEM PDF files
+    db_path : path for the persistent ChromaDB store
+    collection_name : name of the ChromaDB collection
 
-    Returns (collection, n_chunks, chunk_inventory).
+    Returns
+    -------
+    Dict with ingestion statistics: total_chunks, total_pages, per_file, etc.
     """
     oem_dir = Path(oem_dir)
-    db_dir = Path(db_dir)
-    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = Path(db_path)
+    db_path.mkdir(parents=True, exist_ok=True)
 
-    # Extract text from all PDFs
-    print("--- PDF Text Extraction ---")
-    pages = extract_all_pdfs(oem_dir)
-    if not pages:
-        raise FileNotFoundError(f"No PDF content extracted from {oem_dir}")
-    print(f"Total pages with text: {len(pages)}")
+    # 1. Extract text from all PDFs
+    all_docs = extract_all_pdfs(oem_dir)
 
-    # Chunk
-    print("\n--- Chunking ---")
-    all_chunks = chunk_pages(pages)
-    print(f"Total chunks: {len(all_chunks)}")
+    # 2. Load embedding model
+    model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
-    # Stats
-    type_counts = {}
-    word_counts = []
-    for c in all_chunks:
-        ct = c["content_type"]
-        type_counts[ct] = type_counts.get(ct, 0) + 1
-        word_counts.append(_word_count(c["text"]))
-
-    for ct, count in sorted(type_counts.items()):
-        print(f"  {ct}: {count} chunks")
-    print(f"  Average chunk size: {sum(word_counts) / len(word_counts):.0f} words")
-    print(f"  Min: {min(word_counts)}, Max: {max(word_counts)}")
-
-    # Load embedding model
-    print(f"\n--- Embedding ({model_name}) ---")
-    model = SentenceTransformer(model_name)
-
-    texts = [c["text"] for c in all_chunks]
-    print(f"Embedding {len(texts)} chunks...")
-    embeddings = model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
-
-    # Initialize ChromaDB
-    print("\n--- Storing in ChromaDB ---")
-    client = chromadb.PersistentClient(path=str(db_dir))
+    # 3. Create/open ChromaDB
+    client = chromadb.PersistentClient(path=str(db_path))
+    # Delete existing collection if present so re-runs are idempotent
     try:
-        client.delete_collection(COLLECTION_NAME)
+        client.delete_collection(collection_name)
     except Exception:
         pass
-    collection = client.create_collection(
-        name=COLLECTION_NAME,
+    collection = client.get_or_create_collection(
+        name=collection_name,
         metadata={"hnsw:space": "cosine"},
     )
 
-    ids = [f"chunk_{i:04d}" for i in range(len(all_chunks))]
-    metadatas = [
-        {
-            "source_file": c["source_file"],
-            "page": c["page"],
-            "section_header": c.get("section_header", ""),
-            "content_type": c["content_type"],
-            "chunk_index": c["chunk_index"],
+    # 4. Chunk and embed
+    all_chunks_meta: list[dict] = []
+    all_ids: list[str] = []
+    all_texts: list[str] = []
+    all_embeddings: list[list[float]] = []
+    all_metadatas: list[dict] = []
+
+    total_pages = 0
+    per_file_stats: dict[str, dict] = {}
+
+    for filename, pages in all_docs.items():
+        first_page_text = pages[0]["text"] if pages else ""
+        manufacturer = detect_manufacturer(filename, first_page_text)
+        file_chunk_count = 0
+        total_pages += len(pages)
+
+        # Track current section header across pages
+        current_section = ""
+
+        for page_info in pages:
+            page_num = page_info["page"]
+            text = page_info["text"]
+
+            # Detect section header
+            detected = _detect_section_header(text)
+            if detected:
+                current_section = detected
+
+            # Classify content type
+            ctype = classify_content_type(text)
+
+            # Chunk
+            chunks = chunk_page(text, ctype, current_section)
+
+            for ci, chunk_text in enumerate(chunks):
+                chunk_id = f"{filename}__p{page_num}__c{ci}"
+                meta = {
+                    "source": filename,
+                    "page": page_num,
+                    "section_header": current_section,
+                    "content_type": ctype,
+                    "manufacturer": manufacturer,
+                }
+
+                all_ids.append(chunk_id)
+                all_texts.append(chunk_text)
+                all_metadatas.append(meta)
+                all_chunks_meta.append({
+                    "id": chunk_id,
+                    **meta,
+                    "word_count": len(chunk_text.split()),
+                })
+                file_chunk_count += 1
+
+        per_file_stats[filename] = {
+            "pages": len(pages),
+            "chunks": file_chunk_count,
+            "manufacturer": manufacturer,
         }
-        for c in all_chunks
-    ]
 
-    # ChromaDB has a batch size limit; add in batches
-    batch_size = 500
-    for start in range(0, len(ids), batch_size):
-        end = min(start + batch_size, len(ids))
-        collection.add(
-            ids=ids[start:end],
-            embeddings=embeddings[start:end].tolist(),
-            documents=texts[start:end],
-            metadatas=metadatas[start:end],
+    # 5. Embed in batches
+    batch_size = 64
+    for i in range(0, len(all_texts), batch_size):
+        batch_texts = all_texts[i : i + batch_size]
+        embeddings = model.encode(batch_texts, show_progress_bar=False).tolist()
+        all_embeddings.extend(embeddings)
+
+    # 6. Upsert into ChromaDB
+    # ChromaDB has a batch limit; upsert in chunks of 5000
+    for i in range(0, len(all_ids), 5000):
+        collection.upsert(
+            ids=all_ids[i : i + 5000],
+            embeddings=all_embeddings[i : i + 5000],
+            documents=all_texts[i : i + 5000],
+            metadatas=all_metadatas[i : i + 5000],
         )
 
-    print(f"Ingested {len(all_chunks)} chunks into collection '{COLLECTION_NAME}'")
+    # 7. Save chunk inventory CSV
+    inventory_path = Path("analysis/chunk_inventory.csv")
+    inventory_path.parent.mkdir(parents=True, exist_ok=True)
+    if all_chunks_meta:
+        fieldnames = list(all_chunks_meta[0].keys())
+        with open(inventory_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(all_chunks_meta)
 
-    # Build chunk inventory
-    inventory = []
-    for i, c in enumerate(all_chunks):
-        inventory.append(
-            {
-                "chunk_id": ids[i],
-                "source": c["source_file"],
-                "page": c["page"],
-                "section_header": c.get("section_header", ""),
-                "content_type": c["content_type"],
-                "word_count": _word_count(c["text"]),
-                "first_80_chars": c["text"][:80].replace("\n", " "),
-            }
-        )
+    # 8. Print summary
+    stats = {
+        "total_chunks": len(all_ids),
+        "total_pages": total_pages,
+        "per_file": per_file_stats,
+        "db_path": str(db_path),
+        "collection": collection_name,
+    }
 
-    return collection, len(all_chunks), inventory
+    print(f"\n{'='*60}")
+    print("RAG Ingestion Summary")
+    print(f"{'='*60}")
+    print(f"  Total PDFs:   {len(all_docs)}")
+    print(f"  Total pages:  {total_pages}")
+    print(f"  Total chunks: {len(all_ids)}")
+    print(f"  ChromaDB:     {db_path / collection_name}")
+    print(f"  Inventory:    {inventory_path}")
+    for fname, fstats in per_file_stats.items():
+        print(f"  {fname}: {fstats['pages']} pages, {fstats['chunks']} chunks "
+              f"({fstats['manufacturer']})")
+    print(f"{'='*60}\n")
 
-
-def save_chunk_inventory(
-    inventory: list[dict],
-    output_path: str | Path = "analysis/chunk_inventory.csv",
-) -> None:
-    """Save chunk inventory to CSV."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    df = pd.DataFrame(inventory)
-    df.to_csv(output_path, index=False)
-    print(f"Saved chunk inventory ({len(df)} rows) to {output_path}")
-
-
-if __name__ == "__main__":
-    collection, n, inventory = ingest_oem_documents()
-    save_chunk_inventory(inventory)
-    print(f"\nDone. Collection has {collection.count()} documents.")
+    return stats

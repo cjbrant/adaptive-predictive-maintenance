@@ -1,11 +1,8 @@
-"""Extract text from PDF documents, preserving page structure.
+"""PDF text extraction for the RAG pipeline.
 
-Uses PyMuPDF (fitz) to handle the SKF catalogue's dense product tables
-and the failure analysis guide's mixed prose/image content.
-
-The SKF catalogue tables are the hardest part. PyMuPDF extracts table cells
-as individual lines (one value per line), not as tab-delimited rows. This
-module reconstructs table rows from the block-level positioning data.
+Extracts text from OEM bearing specification PDFs using PyMuPDF (fitz).
+This is the first stage of the RAG pipeline:
+    pdf_extract -> ingest -> retrieve -> extract_params
 """
 
 from __future__ import annotations
@@ -16,230 +13,206 @@ from pathlib import Path
 import fitz  # PyMuPDF
 
 
-def _clean_page_text(text: str) -> str:
-    """Clean extracted text: collapse whitespace, remove repeated headers/footers."""
-    lines = text.split("\n")
-    cleaned = []
-    for line in lines:
-        stripped = line.strip()
-        if re.match(r"^\d{1,3}$", stripped):
-            continue
-        if stripped in ("SKF", "®", "SKF Group", "www.skf.com"):
-            continue
-        cleaned.append(line)
+def _clean_text(text: str) -> str:
+    """Collapse whitespace and strip repeated headers/footers.
 
-    text = "\n".join(cleaned)
+    Parameters
+    ----------
+    text : raw extracted text from a PDF page
+
+    Returns
+    -------
+    Cleaned text with collapsed whitespace and trimmed edges.
+    """
+    # Collapse runs of whitespace (spaces, tabs) into single spaces
+    text = re.sub(r"[^\S\n]+", " ", text)
+    # Collapse 3+ consecutive newlines into double newlines
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def _is_bearing_designation(text: str) -> bool:
-    """Check if a string looks like a bearing designation."""
-    text = text.strip().lstrip("* ")
-    return bool(re.match(r"^\d{3,6}[A-Za-z0-9 \-/]*$", text))
-
-
-def _is_numeric_value(text: str) -> bool:
-    """Check if a string is a numeric value (possibly with European comma decimals)."""
+    # Strip each line
+    lines = [line.strip() for line in text.splitlines()]
+    text = "\n".join(lines)
+    # Final strip
     text = text.strip()
-    return bool(re.match(r"^[\d\s,.\-–]+$", text)) and any(c.isdigit() for c in text)
+    return text
 
 
-def _reconstruct_table_from_blocks(page: fitz.Page) -> list[str] | None:
+def _strip_repeated_headers_footers(pages_text: list[str]) -> list[str]:
+    """Remove lines that appear identically on most pages (headers/footers).
+
+    Checks the first and last 2 lines of each page. If a line appears on
+    more than half the pages, it is considered a repeated header or footer
+    and is removed from all pages.
+
+    Parameters
+    ----------
+    pages_text : list of raw text strings, one per page
+
+    Returns
+    -------
+    List of text strings with repeated header/footer lines removed.
     """
-    Reconstruct product table rows from positioned text blocks.
+    if len(pages_text) < 4:
+        return pages_text
 
-    PyMuPDF's get_text("blocks") returns (x0, y0, x1, y1, text, block_idx, type).
-    By grouping text spans by their y-coordinate, we can reconstruct rows.
-    Returns a list of row strings, or None if the page isn't tabular.
+    # Collect candidate header/footer lines
+    from collections import Counter
+    candidates: Counter[str] = Counter()
+
+    for text in pages_text:
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        # Check first 2 and last 2 lines
+        edge_lines = set()
+        for line in lines[:2]:
+            edge_lines.add(line)
+        for line in lines[-2:]:
+            edge_lines.add(line)
+        for line in edge_lines:
+            candidates[line] += 1
+
+    threshold = len(pages_text) * 0.5
+    repeated = {line for line, count in candidates.items()
+                if count >= threshold and len(line) < 200}
+
+    if not repeated:
+        return pages_text
+
+    cleaned = []
+    for text in pages_text:
+        lines = text.splitlines()
+        filtered = [l for l in lines if l.strip() not in repeated]
+        cleaned.append("\n".join(filtered))
+    return cleaned
+
+
+def _ocr_fallback(pdf_path: Path, n_pages: int) -> list[str]:
+    """OCR fallback for image-only PDFs using pytesseract.
+
+    Renders each page to a high-res pixmap and runs Tesseract OCR.
+    Returns list of OCR'd text strings, one per page.
     """
-    text_dict = page.get_text("dict")
-    if not text_dict.get("blocks"):
-        return None
+    try:
+        import pytesseract
+        from PIL import Image
+        import io
+    except ImportError:
+        print(f"  OCR skipped for {pdf_path.name}: pytesseract or Pillow not installed")
+        return [""] * n_pages
 
-    # Collect all text spans with their positions
-    spans = []
-    for block in text_dict["blocks"]:
-        if block.get("type") != 0:  # text block
-            continue
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                text = span["text"].strip()
-                if not text:
-                    continue
-                bbox = span["bbox"]  # (x0, y0, x1, y1)
-                y_center = (bbox[1] + bbox[3]) / 2.0
-                x_left = bbox[0]
-                spans.append({"text": text, "y": y_center, "x": x_left})
-
-    if not spans:
-        return None
-
-    # Group spans into rows by y-coordinate (within ~4pt tolerance)
-    spans.sort(key=lambda s: (s["y"], s["x"]))
-    rows: list[list[dict]] = []
-    current_row: list[dict] = []
-    current_y = spans[0]["y"]
-
-    for span in spans:
-        if abs(span["y"] - current_y) > 4.0:
-            if current_row:
-                rows.append(current_row)
-            current_row = [span]
-            current_y = span["y"]
-        else:
-            current_row.append(span)
-
-    if current_row:
-        rows.append(current_row)
-
-    # Convert rows to strings, tab-separated
-    row_strings = []
-    designation_count = 0
-    numeric_row_count = 0
-
-    for row in rows:
-        row.sort(key=lambda s: s["x"])
-        texts = [s["text"] for s in row]
-        joined = "\t".join(texts)
-        row_strings.append(joined)
-
-        # Count rows that look like table data
-        full_text = " ".join(texts)
-        if _is_bearing_designation(texts[0] if texts else ""):
-            designation_count += 1
-        if sum(1 for t in texts if _is_numeric_value(t)) >= 3:
-            numeric_row_count += 1
-
-    # A page is a product table if it has many designation rows or numeric rows
-    if designation_count >= 3 or numeric_row_count >= 8:
-        return row_strings
-
-    return None
-
-
-def is_table_page(page_text: str) -> bool:
-    """
-    Heuristic to detect product table pages from plain text.
-
-    Checks for bearing designation patterns and high numeric density.
-    This is a fallback — prefer _reconstruct_table_from_blocks when
-    the page object is available.
-    """
-    lines = [l.strip() for l in page_text.split("\n") if l.strip()]
-    if not lines:
-        return False
-
-    # Count lines that look like bearing designations
-    designation_lines = sum(1 for l in lines if _is_bearing_designation(l))
-
-    # Count purely numeric lines (table cell values)
-    numeric_lines = sum(1 for l in lines if _is_numeric_value(l))
-
-    # Column header detection
-    header_terms = {"Principal", "Designation", "dimensions", "dynamic", "static",
-                    "load", "speed", "Mass", "Fatigue"}
-    has_header = any(
-        sum(1 for t in header_terms if t in l) >= 2
-        for l in lines
-    )
-
-    # Heuristic: table pages have many designations OR many numeric lines with headers
-    return (designation_lines >= 5
-            or (has_header and designation_lines >= 2)
-            or (has_header and numeric_lines >= 20))
-
-
-def find_table_header(lines: list[str]) -> str | None:
-    """Find column header from reconstructed table rows or raw text lines."""
-    header_keywords = {"Principal", "Basic", "Fatigue", "Speed", "Mass",
-                       "Designation", "dimensions", "dynamic", "static",
-                       "load", "limit", "speed", "Reference", "Limiting"}
-    unit_keywords = {"mm", "kN", "r/min", "kg"}
-
-    header_parts = []
-    for line in lines[:15]:  # Headers are at the top
-        words = set(line.replace("\t", " ").split())
-        if len(words & header_keywords) >= 2:
-            header_parts.append(line.strip())
-        elif len(words & unit_keywords) >= 2:
-            header_parts.append(line.strip())
-        elif re.search(r"\bd\b.*\bD\b.*\bB\b", line):
-            header_parts.append(line.strip())
-
-    if header_parts:
-        return " | ".join(header_parts)
-    return None
-
-
-def extract_pdf_text(pdf_path: str | Path) -> list[dict]:
-    """
-    Extract text from a PDF, preserving page structure.
-
-    For catalogue product table pages, attempts block-level reconstruction
-    to produce tab-delimited rows. Falls back to plain text extraction
-    for prose pages.
-
-    Returns a list of dicts, one per page:
-      [{"page": 1, "text": "...", "source": "filename.pdf",
-        "is_table": bool, "char_count": int}, ...]
-    """
-    pdf_path = Path(pdf_path)
+    print(f"  Running OCR on {pdf_path.name} ({n_pages} pages)...")
     doc = fitz.open(str(pdf_path))
-    source_name = pdf_path.name
-    pages = []
+    ocr_pages: list[str] = []
 
-    for page_idx in range(len(doc)):
-        page = doc[page_idx]
+    for page_num in range(len(doc)):
+        try:
+            # Render page at 300 DPI for OCR quality
+            mat = fitz.Matrix(300 / 72, 300 / 72)
+            pix = doc[page_num].get_pixmap(matrix=mat)
+            img_data = pix.tobytes("png")
+            img = Image.open(io.BytesIO(img_data))
 
-        # Try block-based table reconstruction first
-        table_rows = _reconstruct_table_from_blocks(page)
+            # Pre-process for better OCR: convert to grayscale, increase contrast
+            img = img.convert("L")  # grayscale
+            try:
+                from PIL import ImageFilter, ImageOps
+                img = ImageOps.autocontrast(img, cutoff=1)
+                img = img.filter(ImageFilter.SHARPEN)
+            except ImportError:
+                pass
 
-        if table_rows is not None:
-            text = "\n".join(table_rows)
-            pages.append(
-                {
-                    "page": page_idx + 1,
-                    "text": text,
-                    "source": source_name,
-                    "is_table": True,
-                    "char_count": len(text),
-                }
+            text = pytesseract.image_to_string(
+                img,
+                config="--psm 6",  # assume uniform block of text
             )
-        else:
-            raw_text = page.get_text("text")
-            cleaned = _clean_page_text(raw_text)
-
-            if len(cleaned) < 50:
-                continue
-
-            # Check if it's a table page via text heuristic
-            table_flag = is_table_page(cleaned)
-
-            pages.append(
-                {
-                    "page": page_idx + 1,
-                    "text": cleaned,
-                    "source": source_name,
-                    "is_table": table_flag,
-                    "char_count": len(cleaned),
-                }
-            )
+            ocr_pages.append(text)
+            if (page_num + 1) % 10 == 0:
+                print(f"    OCR page {page_num + 1}/{len(doc)}")
+        except Exception as e:
+            print(f"    OCR failed on page {page_num + 1}: {e}")
+            ocr_pages.append("")
 
     doc.close()
-    return pages
+    print(f"  OCR complete: {sum(1 for t in ocr_pages if len(t.strip()) >= 50)} pages with text")
+    return ocr_pages
 
 
-def extract_all_pdfs(oem_dir: str | Path = "data/oem") -> list[dict]:
-    """Extract text from all PDFs in the OEM directory."""
+def extract_pdf(pdf_path: str | Path) -> list[dict]:
+    """Extract text from a single PDF file.
+
+    For each page, extracts text using PyMuPDF's text mode. Pages with
+    fewer than 50 characters after cleaning are skipped (likely full-page
+    images or drawings).
+
+    Parameters
+    ----------
+    pdf_path : path to the PDF file
+
+    Returns
+    -------
+    List of dicts with keys: "page" (1-indexed), "text", "source" (filename).
+    """
+    pdf_path = Path(pdf_path)
+    filename = pdf_path.name
+
+    doc = fitz.open(str(pdf_path))
+    raw_pages: list[str] = []
+
+    for page in doc:
+        text = page.get_text("text")
+
+        # Also try block extraction for better table reconstruction
+        blocks = page.get_text("blocks")
+        if blocks:
+            block_text = "\n".join(
+                b[4] for b in blocks if b[6] == 0  # type 0 = text blocks
+            )
+            # Use block text if it captures more content
+            if len(block_text.strip()) > len(text.strip()):
+                text = block_text
+
+        raw_pages.append(text)
+
+    # If no pages yielded text, try OCR as fallback
+    text_pages_count = sum(1 for t in raw_pages if len(t.strip()) >= 50)
+    if text_pages_count == 0 and len(raw_pages) > 0:
+        raw_pages = _ocr_fallback(pdf_path, len(raw_pages))
+
+    doc.close()
+
+    # Strip repeated headers/footers across pages
+    cleaned_pages = _strip_repeated_headers_footers(raw_pages)
+
+    results: list[dict] = []
+    for i, text in enumerate(cleaned_pages):
+        cleaned = _clean_text(text)
+        # Skip pages with < 50 chars (full-page images/drawings)
+        if len(cleaned) < 50:
+            continue
+        results.append({
+            "page": i + 1,  # 1-indexed
+            "text": cleaned,
+            "source": filename,
+        })
+
+    return results
+
+
+def extract_all_pdfs(oem_dir: str | Path) -> dict[str, list[dict]]:
+    """Extract text from all PDFs in a directory.
+
+    Parameters
+    ----------
+    oem_dir : directory containing OEM PDF files
+
+    Returns
+    -------
+    Dict mapping filename to list of page dicts (same format as extract_pdf).
+    """
     oem_dir = Path(oem_dir)
-    all_pages = []
+    results: dict[str, list[dict]] = {}
 
-    for pdf_file in sorted(oem_dir.glob("*.pdf")):
-        print(f"Extracting {pdf_file.name}...")
-        pages = extract_pdf_text(pdf_file)
-        table_count = sum(1 for p in pages if p["is_table"])
-        all_pages.extend(pages)
-        print(f"  {len(pages)} pages ({table_count} table, {len(pages)-table_count} prose)")
+    for pdf_path in sorted(oem_dir.glob("*.pdf")):
+        pages = extract_pdf(pdf_path)
+        if pages:
+            results[pdf_path.name] = pages
 
-    return all_pages
+    return results

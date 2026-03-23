@@ -1,0 +1,6 @@
+dataset,unit_id,model,prior_quality,equipment_type,is_run_to_failure,n_valid,rmse,mae,nasa_score,mean_bias,detection_lead_time,false_alarm_rate,detection_success
+cwru,cwru_inner_race_0hp,threshold_alarm,exact_oem,ball_bearing,False,502,,,,,501,1.0,True
+cwru,cwru_inner_race_0hp,static_curve,exact_oem,ball_bearing,False,502,0.5776382962812361,0.5000000000000125,25.95888676738305,0.5000000000000125,48,0.0,True
+cwru,cwru_inner_race_0hp,rolling_refit,exact_oem,ball_bearing,False,502,1723.6595605018315,737.601593625498,110000018.31245479,737.601593625498,48,0.0,True
+cwru,cwru_inner_race_0hp,pid_adaptive,exact_oem,ball_bearing,False,502,259.99281402953864,126.80554912081836,171240672.24836308,-104.99561601694734,499,0.064,True
+cwru,cwru_inner_race_0hp,pid_regime,exact_oem,ball_bearing,False,502,13189.254905758022,724.330625757437,179284948.77340442,488.7116522621977,495,0.04,True
